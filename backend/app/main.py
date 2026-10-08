@@ -1,5 +1,7 @@
+from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
+from typing import AsyncGenerator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from . import models
 from .database import Base, engine, get_db
+from .seed import seed_database
 from .schemas import (
     BookingCreate,
     BookingDateRange,
@@ -19,7 +22,14 @@ from .schemas import (
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Airbnb Clone API")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+    seed_database()
+    yield
+
+
+app = FastAPI(title="Airbnb Clone API", lifespan=lifespan)
 
 CLEANING_FEE = Decimal("35.00")
 SERVICE_FEE_RATE = Decimal("0.10")

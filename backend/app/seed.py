@@ -1,7 +1,10 @@
-from .database import Base, SessionLocal, engine
-from .models import Listing
+from datetime import date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 
-Base.metadata.create_all(bind=engine)
+from sqlalchemy.orm import Session
+
+from .database import Base, SessionLocal
+from .models import Booking, Listing
 
 
 sample_listings = [
@@ -88,23 +91,63 @@ sample_listings = [
 ]
 
 
-def seed_database():
-    db = SessionLocal()
+def seed_database(db: Session | None = None) -> None:
+    owns_session = db is None
+    if db is None:
+        db = SessionLocal()
+
     try:
+        Base.metadata.create_all(bind=db.get_bind())
         existing_count = db.query(Listing).count()
 
         if existing_count > 0:
-            print(f"Database already has {existing_count} listings. No new listings added.")
+            print(
+                f"Database already has {existing_count} listings. "
+                "No sample listings or bookings added."
+            )
             return
 
-        db.add_all([Listing(**listing) for listing in sample_listings])
+        listings = [Listing(**listing) for listing in sample_listings]
+        db.add_all(listings)
+        db.flush()
+
+        listings_by_title = {listing.title: listing for listing in listings}
+        today = date.today()
+        sample_bookings = [
+            ("Amalfi Coast Villa with Sea Views", 45, 3, 2),
+            ("Cozy Mountain Cabin", 65, 2, 3),
+            ("Charming City Apartment", 85, 4, 2),
+        ]
+        for title, start_offset, nights, guest_count in sample_bookings:
+            listing = listings_by_title[title]
+            subtotal = Decimal(str(listing.price_per_night)) * nights
+            service_fee = (subtotal * Decimal("0.10")).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+            total_price = subtotal + Decimal("35.00") + service_fee
+            check_in = today + timedelta(days=start_offset)
+            db.add(
+                Booking(
+                    listing=listing,
+                    check_in=check_in,
+                    check_out=check_in + timedelta(days=nights),
+                    guest_count=guest_count,
+                    total_price=float(total_price),
+                )
+            )
+
         db.commit()
-        print(f"Successfully added {len(sample_listings)} sample listings.")
+        print(
+            f"Successfully added {len(listings)} sample listings and "
+            f"{len(sample_bookings)} sample bookings."
+        )
     except Exception:
         db.rollback()
         raise
     finally:
-        db.close()
+        if owns_session:
+            db.close()
 
 
 if __name__ == "__main__":

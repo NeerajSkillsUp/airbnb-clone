@@ -8,6 +8,8 @@ A demo host dashboard supports property listing management.
 ## Features
 
 - Browse database-backed property listings in a responsive marketplace grid.
+- Automatically seed varied sample listings and a few existing bookings when
+  the database has no listings.
 - Search listing titles and locations from the backend, ignoring case and
   surrounding whitespace.
 - Filter stays by guest capacity and date availability, and load additional
@@ -34,9 +36,10 @@ A demo host dashboard supports property listing management.
   `NEXT_PUBLIC_API_URL` environment variable.
 - FastAPI validates request and response data with Pydantic schemas and reads
   and writes records through SQLAlchemy models.
-- The database engine uses `sqlite:///./airbnb.db`. This is a relative path:
-  start the backend from the `backend` directory to use
-  `backend/airbnb.db`.
+- The database engine uses SQLite. By default it uses
+  `sqlite:///./airbnb.db`, a relative path; start the backend from the
+  `backend` directory to use `backend/airbnb.db`. Set `SQLITE_DATABASE_URL` to
+  use a different SQLite file path, such as a mounted persistent disk.
 - On backend startup, `Base.metadata.create_all()` creates tables that do not
   exist. It does not reset existing listing rows. The project does not currently
   include a migration framework.
@@ -55,9 +58,10 @@ airbnb-clone/
 │       ├── main.py               # FastAPI application and API routes
 │       ├── models.py             # Listing and Booking SQLAlchemy models
 │       ├── schemas.py            # Pydantic request/response schemas
-│       └── seed.py               # Optional sample listing seeder
+│       └── seed.py               # Idempotent sample listing/booking seeder
 │   └── tests/
-│       └── test_search_and_availability.py
+│       ├── test_search_and_availability.py
+│       └── test_seed.py                # Initial seed, repeat-run, and availability checks
 └── frontend/
     ├── package.json
     ├── package-lock.json
@@ -109,18 +113,20 @@ current terminal with
 environment's Python directly as
 `.\.venv\Scripts\python.exe`.
 
-Starting the API creates missing tables but does **not** seed listings. For a
-fresh checkout with no populated database, create the sample listings by
-running this command from `backend` before or after starting the API:
+On API startup, missing tables are created. If the database contains no
+listings, the app automatically inserts the eight sample listings and three
+sample bookings. If any listing already exists, automatic seeding skips all
+sample inserts, preserving current listings and bookings.
+
+The same idempotent seeder can also be run manually from `backend`:
 
 ```powershell
 python -m app.seed
 ```
 
-The seeder creates the schema if needed and inserts its eight sample listings
-only when the database contains zero listings. If listings already exist, it
-prints a message and skips seeding; it does not top up or replace existing
-data.
+The command creates the schema if needed. It seeds only an empty listings
+table; repeated runs do not duplicate or replace listings, and do not delete
+bookings.
 
 Start the API from the same `backend` directory:
 
@@ -163,11 +169,35 @@ Open `http://localhost:3000`.
 | Name | Used by | Purpose |
 | --- | --- | --- |
 | `NEXT_PUBLIC_API_URL` | Frontend | Base URL for FastAPI requests. The current local value is `http://127.0.0.1:8000`. Because it has the `NEXT_PUBLIC_` prefix, it is available to browser-side code; do not put secrets in it. |
+| `SQLITE_DATABASE_URL` | Backend | Optional SQLAlchemy SQLite URL. Defaults to `sqlite:///./airbnb.db`; use `sqlite:////var/data/airbnb.db` when a Render persistent disk is mounted at `/var/data`. |
 
-The SQLite URL is currently a constant in `backend/app/database.py`:
-`sqlite:///./airbnb.db`. It is **not** read from an environment variable.
-Because that path is relative to the backend process's current directory, run
-the API from `backend` to use the database file at `backend/airbnb.db`.
+If `SQLITE_DATABASE_URL` is unset, the SQLite path remains relative to the
+backend process's working directory, so run the API from `backend` to use
+`backend/airbnb.db`.
+
+### Deploying the backend to Render with persistent SQLite
+
+Render's local service filesystem is ephemeral by default. Automatic seeding
+populates an empty database after startup, but it does not make later bookings
+or host edits durable. To preserve SQLite data across restarts and deployments:
+
+1. Set the Render service root directory to `backend`, build command to
+   `pip install -r requirements.txt`, and start command to
+   `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+2. Attach a Render persistent disk to the backend service with mount path
+   `/var/data`.
+3. Set the service environment variable
+   `SQLITE_DATABASE_URL=sqlite:////var/data/airbnb.db`, then deploy.
+4. On the first startup with an empty disk, the app creates the schema and
+   inserts the sample listings and bookings. Subsequent startups preserve data
+   already on that disk.
+
+Render currently only supports persistent disks on paid web-service instances.
+Free web services use ephemeral storage, spin down when idle, and lose local
+SQLite changes on restarts, spin-downs, or redeploys. Without a paid disk, the
+database can be reseeded after a restart but user bookings and listing edits
+are not durable. See [Render disks](https://render.com/docs/disks) and
+[Render free instance limitations](https://render.com/docs/free).
 
 The API currently allows the frontend origin `http://localhost:3000` through
 CORS. If you run the frontend on a different origin, adjust
@@ -254,10 +284,16 @@ after check-in; guest counts must be positive. Invalid filter values return
 ## Database and sample data
 
 The SQLAlchemy models are defined in `backend/app/models.py`. A listing can have
-many bookings; each booking references a listing through a foreign key. At
-startup, importing the FastAPI application runs `Base.metadata.create_all()`
-and creates missing tables without clearing existing data. This creates tables
-only: it does not insert sample listings automatically.
+many bookings; each booking references a listing through a foreign key. There
+is no Host model or listing ownership field, so listings and bookings are not
+associated with host identities. Adding host records and ownership would
+require a separate schema change.
+
+At startup, importing the FastAPI application runs `Base.metadata.create_all()`
+and creates missing tables without clearing existing data. The app then seeds
+eight sample listings and three sample bookings only when the listings table is
+empty. Existing listings, host-created listings, and bookings are left
+untouched.
 
 To populate a fresh or empty database with sample listings:
 
@@ -267,10 +303,10 @@ python -m app.seed
 ```
 
 The seeder checks the listing count first and skips inserting if any listings
-already exist. This workspace contains a local `backend/airbnb.db` file, but a
-fresh checkout should not rely on that local database being present or
-pre-populated. Back up local data before manually replacing or removing the
-database file.
+already exist. Repeated runs do not duplicate or replace data and do not delete
+bookings. This workspace contains a local `backend/airbnb.db` file, but a fresh
+checkout should not rely on that local database being present or pre-populated.
+Back up local data before manually replacing or removing the database file.
 
 ## Checks and testing
 
@@ -290,6 +326,8 @@ python -m unittest discover -s tests -v
 The tests use isolated in-memory SQLite databases and cover title/location
 search, capacity and availability filtering, invalid date ranges, pagination,
 booked date ranges, booking fee calculation, and overlap rejection.
+Seeding tests also cover initial sample data, repeat-run preservation, and
+availability of seeded booking ranges.
 
 For a manual API smoke check while the backend is running:
 
@@ -312,7 +350,8 @@ For interactive request/response exploration, use
 - **Listings appear missing or a new database file appears:** the SQLite path
   is relative to the process working directory. Start Uvicorn from `backend`.
 - **The database has no sample listings:** run `python -m app.seed` from
-  `backend`. It intentionally does nothing when any listing already exists.
+  `backend`, or restart the app with an empty listings table. It intentionally
+  does nothing when any listing already exists.
 - **A listing cannot be deleted:** the API protects listings that have
   bookings and responds with `409 Conflict`.
 - **A booking request is rejected:** check the ISO date values, ensure
@@ -324,6 +363,7 @@ For interactive request/response exploration, use
 This is an assignment/demo project, not a production booking service. There is
 no user authentication, account ownership, or authorization. The `/trips` page
 shows all bookings returned by the API, and the host dashboard can manage the
-shared listing collection. There is no payment processing, image upload,
+shared listing collection. Listings and bookings have no host identity
+association. There is no payment processing, image upload,
 cancellation flow, or user-specific booking management. Do not expose this API
 as-is to untrusted users.
