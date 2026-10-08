@@ -1,0 +1,47 @@
+# Frontend dependencies and generated Next.js output
+/frontend/node_modules/
+/frontend/.next/
+/frontend/out/
+/frontend/build/
+
+# Frontend local environment files (keep the shareable example)
+/frontend/.env
+/frontend/.env.*
+!/frontend/.env.example
+
+# Root and backend local environment files (keep only exact example templates)
+/.env
+/.env.*
+!/.env.example
+/backend/.env
+/backend/.env.*
+!/backend/.env.example
+
+# Backend virtual environment and Python-generated files
+/backend/.venv/
+__pycache__/
+*.py[cod]
+
+# Local SQLite database and SQLite journal/sidecar files
+/backend/airbnb.db
+/backend/airbnb.db-*
+/backend/airbnb.db.*
+
+# Common generated build, test, and type-check output
+/build/
+/dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage/
+*.tsbuildinfo
+
+# Operating-system and editor temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
