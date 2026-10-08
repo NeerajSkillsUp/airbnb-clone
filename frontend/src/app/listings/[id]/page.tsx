@@ -25,6 +25,14 @@ type BookingConfirmation = {
   total_price: number;
 };
 
+type BookingDateRange = {
+  check_in: string;
+  check_out: string;
+};
+
+const CLEANING_FEE = 35;
+const SERVICE_FEE_RATE = 0.1;
+
 function isListing(value: unknown): value is Listing {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -44,6 +52,29 @@ function isListing(value: unknown): value is Listing {
     typeof listing.image_url === "string" &&
     typeof listing.max_guests === "number"
   );
+}
+
+function isBookingDateRange(value: unknown): value is BookingDateRange {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const range = value as Record<string, unknown>;
+  return (
+    typeof range.check_in === "string" &&
+    typeof range.check_out === "string"
+  );
+}
+
+function formatDate(value: string): string {
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      }).format(date);
 }
 
 function isBookingConfirmation(value: unknown): value is BookingConfirmation {
@@ -85,8 +116,11 @@ function getApiErrorMessage(data: unknown): string | null {
 export default function ListingDetailsPage() {
   const { id } = useParams<{ id: string }>();
   const [listing, setListing] = useState<Listing | null>(null);
+  const [bookedRanges, setBookedRanges] = useState<BookingDateRange[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isAvailabilityLoading, setIsAvailabilityLoading] = useState(true);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   const [checkIn, setCheckIn] = useState("");
   const [checkOut, setCheckOut] = useState("");
@@ -107,7 +141,9 @@ export default function ListingDetailsPage() {
 
       if (!apiUrl) {
         setError("The listings API URL is not configured. Set NEXT_PUBLIC_API_URL and try again.");
+        setAvailabilityError("The listings API URL is not configured.");
         setIsLoading(false);
+        setIsAvailabilityLoading(false);
         return;
       }
 
@@ -145,7 +181,46 @@ export default function ListingDetailsPage() {
       }
     }
 
+    async function fetchAvailability() {
+      setIsAvailabilityLoading(true);
+      setAvailabilityError(null);
+
+      if (!apiUrl) {
+        setAvailabilityError("The listings API URL is not configured.");
+        setIsAvailabilityLoading(false);
+        return;
+      }
+
+      try {
+        const response = await fetch(
+          `${apiUrl}/listings/${encodeURIComponent(id)}/availability`,
+          { signal: controller.signal },
+        );
+        if (!response.ok) {
+          throw new Error(`Availability service returned an error (${response.status}).`);
+        }
+        const data: unknown = await response.json();
+        if (!Array.isArray(data) || !data.every(isBookingDateRange)) {
+          throw new Error("Availability service returned data in an unexpected format.");
+        }
+        setBookedRanges(data);
+      } catch (availabilityFetchError) {
+        if (!controller.signal.aborted) {
+          setAvailabilityError(
+            availabilityFetchError instanceof Error
+              ? availabilityFetchError.message
+              : "Unable to load booked dates.",
+          );
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsAvailabilityLoading(false);
+        }
+      }
+    }
+
     void fetchListing();
+    void fetchAvailability();
     return () => controller.abort();
   }, [id, retryCount]);
 
@@ -154,8 +229,18 @@ export default function ListingDetailsPage() {
       ? (Date.parse(`${checkOut}T00:00:00Z`) - Date.parse(`${checkIn}T00:00:00Z`)) /
         (24 * 60 * 60 * 1000)
       : 0;
+  const estimatedSubtotal =
+    listing && nights > 0
+      ? Math.round(listing.price_per_night * nights * 100) / 100
+      : null;
+  const estimatedServiceFee =
+    estimatedSubtotal === null
+      ? null
+      : Math.round(estimatedSubtotal * SERVICE_FEE_RATE * 100) / 100;
   const estimatedTotal =
-    listing && nights > 0 ? listing.price_per_night * nights : null;
+    estimatedSubtotal === null || estimatedServiceFee === null
+      ? null
+      : estimatedSubtotal + CLEANING_FEE + estimatedServiceFee;
 
   async function submitBooking(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -173,6 +258,14 @@ export default function ListingDetailsPage() {
     }
     if (nights <= 0) {
       setBookingError("Check-out must be after check-in.");
+      return;
+    }
+    if (
+      bookedRanges.some(
+        (range) => checkIn < range.check_out && checkOut > range.check_in,
+      )
+    ) {
+      setBookingError("Those dates overlap an existing booking. Choose different dates.");
       return;
     }
     if (!Number.isInteger(guestCount) || guestCount < 1 || guestCount > listing.max_guests) {
@@ -222,6 +315,11 @@ export default function ListingDetailsPage() {
       }
 
       setBookingConfirmation(data);
+      setBookedRanges((currentRanges) =>
+        [...currentRanges, { check_in: data.check_in, check_out: data.check_out }].sort(
+          (left, right) => left.check_in.localeCompare(right.check_in),
+        ),
+      );
     } catch (bookingRequestError) {
       setBookingError(
         bookingRequestError instanceof Error
@@ -323,6 +421,35 @@ export default function ListingDetailsPage() {
                   <p className="mt-3 text-sm text-[#717171]">No reviews yet</p>
                 )}
 
+                <section
+                  aria-labelledby="unavailable-dates-heading"
+                  className="mt-5 border-t border-[#ebebeb] pt-4"
+                >
+                  <h2 id="unavailable-dates-heading" className="text-sm font-semibold">
+                    Unavailable dates
+                  </h2>
+                  {isAvailabilityLoading ? (
+                    <p role="status" className="mt-2 text-xs text-[#717171]">
+                      Loading booked dates…
+                    </p>
+                  ) : availabilityError ? (
+                    <p role="alert" className="mt-2 text-xs text-[#c13515]">
+                      {availabilityError} The server will still validate availability when you
+                      reserve.
+                    </p>
+                  ) : bookedRanges.length === 0 ? (
+                    <p className="mt-2 text-xs text-[#717171]">No dates are currently booked.</p>
+                  ) : (
+                    <ul className="mt-2 space-y-1 text-xs text-[#717171]">
+                      {bookedRanges.map((range) => (
+                        <li key={`${range.check_in}-${range.check_out}`}>
+                          {formatDate(range.check_in)} – {formatDate(range.check_out)}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+
                 {bookingConfirmation ? (
                   <div
                     role="status"
@@ -395,17 +522,32 @@ export default function ListingDetailsPage() {
                       </select>
                     </label>
 
-                    {estimatedTotal !== null && nights > 0 && (
+                    {estimatedTotal !== null && estimatedSubtotal !== null &&
+                      estimatedServiceFee !== null && nights > 0 && (
                       <div className="border-t border-[#ebebeb] pt-4 text-sm">
                         <div className="flex justify-between gap-3">
                           <span className="text-[#717171]">
                             ${listing.price_per_night} × {nights}{" "}
                             {nights === 1 ? "night" : "nights"}
                           </span>
-                          <span className="font-medium">${estimatedTotal.toFixed(2)}</span>
+                          <span className="font-medium">${estimatedSubtotal.toFixed(2)}</span>
+                        </div>
+                        <div className="mt-2 flex justify-between gap-3">
+                          <span className="text-[#717171]">Cleaning fee</span>
+                          <span className="font-medium">${CLEANING_FEE.toFixed(2)}</span>
+                        </div>
+                        <div className="mt-2 flex justify-between gap-3">
+                          <span className="text-[#717171]">Service fee (10%)</span>
+                          <span className="font-medium">${estimatedServiceFee.toFixed(2)}</span>
+                        </div>
+                        <div className="mt-3 flex justify-between gap-3 border-t border-[#ebebeb] pt-3">
+                          <span className="font-semibold">Estimated total</span>
+                          <span className="font-semibold">${estimatedTotal.toFixed(2)}</span>
                         </div>
                         <p className="mt-2 text-xs leading-5 text-[#717171]">
-                          Estimated total. The final total is confirmed by the backend.
+                          Estimated total includes a $35 cleaning fee and a 10% service fee on
+                          the nightly subtotal. The backend calculates and confirms the final
+                          total.
                         </p>
                       </div>
                     )}

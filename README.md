@@ -10,10 +10,13 @@ A demo host dashboard supports property listing management.
 - Browse database-backed property listings in a responsive marketplace grid.
 - Search listing titles and locations from the backend, ignoring case and
   surrounding whitespace.
+- Filter stays by guest capacity and date availability, and load additional
+  results with pagination.
 - Filter listings by category and toggle favorites in the browser.
-- View individual listing details and submit bookings with date and guest
-  validation.
-- Calculate booking prices on the server and reject overlapping reservations.
+- View booked date ranges on listing details and submit bookings with date and
+  guest validation.
+- Estimate nightly subtotal, a $35 cleaning fee per booking, and a 10% service
+  fee; the backend calculates the final booking total and rejects overlaps.
 - Review all saved bookings on the demo **My Trips** page.
 - Create, update, and delete listings from the demo **Host dashboard**.
 - Prevent deletion of listings that already have bookings.
@@ -53,6 +56,8 @@ airbnb-clone/
 │       ├── models.py             # Listing and Booking SQLAlchemy models
 │       ├── schemas.py            # Pydantic request/response schemas
 │       └── seed.py               # Optional sample listing seeder
+│   └── tests/
+│       └── test_search_and_availability.py
 └── frontend/
     ├── package.json
     ├── package-lock.json
@@ -186,8 +191,9 @@ All endpoints are served by FastAPI at the configured API origin.
 | --- | --- | --- |
 | `GET` | `/` | API welcome response. |
 | `GET` | `/health` | Returns the API health status. |
-| `GET` | `/listings` | Returns all listings. Optional `search` query parameter filters title or location case-insensitively; blank surrounding whitespace is ignored. |
+| `GET` | `/listings` | Returns listings. Optional `search` matches title or location case-insensitively; `location` separately filters the location; `guests` requires sufficient capacity; `check_in` and `check_out` together exclude overlapping bookings; `limit` and `offset` paginate results. When `limit` is omitted, all matching rows are returned as before. |
 | `GET` | `/listings/{listing_id}` | Returns one listing or `404` if it does not exist. |
+| `GET` | `/listings/{listing_id}/availability` | Returns the listing's booked check-in/check-out ranges, or `404` if the listing does not exist. |
 | `POST` | `/listings` | Creates a listing; returns `201` and the created listing. |
 | `PUT` | `/listings/{listing_id}` | Replaces editable listing fields; returns `404` for an unknown listing. |
 | `DELETE` | `/listings/{listing_id}` | Deletes a listing and returns `204`. Returns `404` if missing and `409` if the listing has bookings. |
@@ -236,10 +242,14 @@ do not overlap another booking for that listing. Booking dates occupy
 `[check_in, check_out)`: check-in is included and check-out is excluded, so a
 new reservation may start on the previous reservation's check-out date.
 
-The server calculates `total_price` as nightly price multiplied by the number
-of nights; a client does not provide an authoritative total. Invalid schema
-input or guest capacity returns `422`, a missing listing returns `404`, and
-unavailable dates return `409`.
+The server calculates `total_price` as the nightly subtotal plus a $35 cleaning
+fee per booking and a 10% service fee on the nightly subtotal; the client does
+not provide an authoritative total. These fee values are demonstration
+assumptions, not fees charged by a payment provider. Invalid schema input or
+guest capacity returns `422`, a missing listing returns `404`, and unavailable
+dates return `409`. Availability search requires both dates, with check-out
+after check-in; guest counts must be positive. Invalid filter values return
+`422`.
 
 ## Database and sample data
 
@@ -271,13 +281,15 @@ npm run lint
 npm run build
 ```
 
-There is no automated backend test suite or test-runner configuration in this
-project. A Python syntax/bytecode compilation check is available from
-`backend`:
+Run the backend unit tests from `backend` with Python's standard library:
 
 ```powershell
-.\.venv\Scripts\python.exe -m compileall -q app
+python -m unittest discover -s tests -v
 ```
+
+The tests use isolated in-memory SQLite databases and cover title/location
+search, capacity and availability filtering, invalid date ranges, pagination,
+booked date ranges, booking fee calculation, and overlap rejection.
 
 For a manual API smoke check while the backend is running:
 

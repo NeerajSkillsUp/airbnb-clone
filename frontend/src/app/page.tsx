@@ -1,8 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import {
+  appendUniqueListings,
+  PaginationRequestGuard,
+} from "./pagination-requests.mjs";
 
 const categories = [
   { name: "All homes", icon: "⌂" },
@@ -16,6 +20,15 @@ const categories = [
   { name: "Castles", icon: "♜" },
   { name: "OMG!", icon: "✧" },
 ];
+
+const PAGE_SIZE = 8;
+
+type SearchFilters = {
+  search: string;
+  checkIn: string;
+  checkOut: string;
+  guests: string;
+};
 
 type ApiListing = {
   id: number;
@@ -56,9 +69,23 @@ export default function Home() {
   const [listings, setListings] = useState<ApiListing[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   const [searchInput, setSearchInput] = useState("");
-  const [appliedSearch, setAppliedSearch] = useState("");
+  const [checkIn, setCheckIn] = useState("");
+  const [checkOut, setCheckOut] = useState("");
+  const [guestInput, setGuestInput] = useState("");
+  const [filterError, setFilterError] = useState<string | null>(null);
+  const [appliedFilters, setAppliedFilters] = useState<SearchFilters>({
+    search: "",
+    checkIn: "",
+    checkOut: "",
+    guests: "",
+  });
+  const [hasMore, setHasMore] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const paginationRequests = useRef(new PaginationRequestGuard());
+  const nextPageOffset = useRef(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -67,6 +94,8 @@ export default function Home() {
     async function fetchListings() {
       setIsLoading(true);
       setError(null);
+      setLoadMoreError(null);
+      setHasMore(true);
 
       if (!apiUrl) {
         setError("The listings API URL is not configured. Set NEXT_PUBLIC_API_URL and try again.");
@@ -76,8 +105,16 @@ export default function Home() {
 
       try {
         const searchParams = new URLSearchParams();
-        if (appliedSearch) {
-          searchParams.set("search", appliedSearch);
+        searchParams.set("limit", String(PAGE_SIZE));
+        if (appliedFilters.search) {
+          searchParams.set("search", appliedFilters.search);
+        }
+        if (appliedFilters.checkIn) {
+          searchParams.set("check_in", appliedFilters.checkIn);
+          searchParams.set("check_out", appliedFilters.checkOut);
+        }
+        if (appliedFilters.guests) {
+          searchParams.set("guests", appliedFilters.guests);
         }
         const queryString = searchParams.toString();
         const response = await fetch(
@@ -96,6 +133,8 @@ export default function Home() {
         }
 
         setListings(data);
+        nextPageOffset.current = data.length;
+        setHasMore(data.length === PAGE_SIZE);
       } catch (fetchError) {
         if (controller.signal.aborted) {
           return;
@@ -114,7 +153,73 @@ export default function Home() {
 
     void fetchListings();
     return () => controller.abort();
-  }, [appliedSearch, retryCount]);
+  }, [appliedFilters, retryCount]);
+
+  function invalidatePaginationRequests() {
+    paginationRequests.current.invalidate();
+    nextPageOffset.current = 0;
+    setIsLoadingMore(false);
+    setLoadMoreError(null);
+  }
+
+  async function loadMoreListings() {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "");
+    if (!apiUrl || !hasMore) {
+      return;
+    }
+
+    const request = paginationRequests.current.begin();
+    if (!request) {
+      return;
+    }
+    setIsLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const searchParams = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(nextPageOffset.current),
+      });
+      if (appliedFilters.search) {
+        searchParams.set("search", appliedFilters.search);
+      }
+      if (appliedFilters.checkIn) {
+        searchParams.set("check_in", appliedFilters.checkIn);
+        searchParams.set("check_out", appliedFilters.checkOut);
+      }
+      if (appliedFilters.guests) {
+        searchParams.set("guests", appliedFilters.guests);
+      }
+
+      const response = await fetch(`${apiUrl}/listings?${searchParams.toString()}`);
+      if (!response.ok) {
+        throw new Error(`The listings service returned an error (${response.status}).`);
+      }
+      const data: unknown = await response.json();
+      if (!Array.isArray(data) || !data.every(isApiListing)) {
+        throw new Error("The listings service returned data in an unexpected format.");
+      }
+      if (!paginationRequests.current.isCurrent(request)) {
+        return;
+      }
+      nextPageOffset.current += data.length;
+      setListings((currentListings) =>
+        appendUniqueListings(currentListings, data),
+      );
+      setHasMore(data.length === PAGE_SIZE);
+    } catch (fetchError) {
+      if (paginationRequests.current.isCurrent(request)) {
+        setLoadMoreError(
+          fetchError instanceof Error
+            ? `${fetchError.message} Try loading more stays again.`
+            : "Unable to load more stays. Please try again.",
+        );
+      }
+    } finally {
+      if (paginationRequests.current.finish(request)) {
+        setIsLoadingMore(false);
+      }
+    }
+  }
 
   const categoryOptions = [
     ...categories,
@@ -130,12 +235,41 @@ export default function Home() {
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setAppliedSearch(searchInput.trim());
+    setFilterError(null);
+    if (Boolean(checkIn) !== Boolean(checkOut)) {
+      setFilterError("Select both check-in and check-out dates, or clear both.");
+      return;
+    }
+    if (checkIn && checkOut && checkOut <= checkIn) {
+      setFilterError("Check-out must be after check-in.");
+      return;
+    }
+    if (
+      guestInput &&
+      (!Number.isInteger(Number(guestInput)) ||
+        Number(guestInput) < 1 ||
+        Number(guestInput) > 100)
+    ) {
+      setFilterError("Guest count must be a whole number between 1 and 100.");
+      return;
+    }
+    invalidatePaginationRequests();
+    setAppliedFilters({
+      search: searchInput.trim(),
+      checkIn,
+      checkOut,
+      guests: guestInput,
+    });
   }
 
   function clearSearch() {
+    invalidatePaginationRequests();
     setSearchInput("");
-    setAppliedSearch("");
+    setCheckIn("");
+    setCheckOut("");
+    setGuestInput("");
+    setFilterError(null);
+    setAppliedFilters({ search: "", checkIn: "", checkOut: "", guests: "" });
   }
 
   function toggleFavorite(id: number) {
@@ -149,6 +283,16 @@ export default function Home() {
       return nextFavorites;
     });
   }
+
+  const hasSearchFilters = Boolean(
+    searchInput ||
+      checkIn ||
+      checkOut ||
+      guestInput ||
+      appliedFilters.search ||
+      appliedFilters.checkIn ||
+      appliedFilters.guests,
+  );
 
   return (
     <main className="min-h-screen bg-white text-[#222222]">
@@ -210,9 +354,13 @@ export default function Home() {
           <form
             role="search"
             onSubmit={submitSearch}
-            className="mx-auto flex max-w-[850px] items-center rounded-full border border-[#dddddd] bg-white py-2 pl-5 pr-2 shadow-[0_3px_12px_rgba(0,0,0,0.08)] transition-shadow hover:shadow-[0_5px_16px_rgba(0,0,0,0.12)]"
+            className="mx-auto flex max-w-[850px] flex-wrap items-center rounded-2xl border border-[#dddddd] bg-white py-2 pl-5 pr-2 shadow-[0_3px_12px_rgba(0,0,0,0.08)] transition-shadow hover:shadow-[0_5px_16px_rgba(0,0,0,0.12)] sm:flex-nowrap sm:rounded-full"
           >
-            <label className="min-w-0 flex-1 px-2 sm:px-4">
+            <label
+              className={`min-w-0 px-2 sm:flex-1 sm:basis-0 sm:px-4 ${
+                hasSearchFilters ? "basis-[calc(100%-3rem)]" : "basis-full"
+              }`}
+            >
               <span className="block text-xs font-semibold">Where</span>
               <input
                 type="text"
@@ -223,47 +371,61 @@ export default function Home() {
                 className="w-full truncate border-0 bg-transparent p-0 text-sm text-[#717171] outline-none placeholder:text-[#717171]"
               />
             </label>
-            {(searchInput || appliedSearch) && (
+            {hasSearchFilters && (
               <button
                 type="button"
                 onClick={clearSearch}
-                aria-label="Clear destination search"
-                className="mr-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-lg text-[#717171] hover:bg-[#f7f7f7] hover:text-[#222222]"
+                aria-label="Clear search and stay filters"
+                className="mr-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-lg text-[#717171] hover:bg-[#f7f7f7] hover:text-[#222222] sm:mr-2"
               >
                 ×
               </button>
             )}
-            <span aria-hidden="true" className="h-8 border-l border-[#dddddd]" />
-            <label className="hidden min-w-0 flex-1 px-4 sm:block">
+            <span aria-hidden="true" className="hidden h-8 border-l border-[#dddddd] sm:block" />
+            <label className="basis-1/2 min-w-0 border-t border-[#ebebeb] px-2 pt-3 sm:flex-1 sm:basis-0 sm:border-t-0 sm:px-4 sm:pt-0">
               <span className="block text-xs font-semibold">Check in</span>
               <input
-                type="text"
+                type="date"
+                value={checkIn}
+                onChange={(event) => setCheckIn(event.target.value)}
+                aria-label="Check-in date"
+                max={checkOut || undefined}
                 placeholder="Add dates"
-                className="w-full truncate border-0 bg-transparent p-0 text-sm text-[#717171] outline-none placeholder:text-[#717171]"
+                className="w-full min-w-0 border-0 bg-transparent p-0 text-sm text-[#717171] outline-none"
               />
             </label>
             <span aria-hidden="true" className="hidden h-8 border-l border-[#dddddd] sm:block" />
-            <label className="hidden min-w-0 flex-1 px-4 md:block">
+            <label className="basis-1/2 min-w-0 border-t border-[#ebebeb] px-2 pt-3 sm:flex-1 sm:basis-0 sm:border-t-0 sm:px-4 sm:pt-0">
               <span className="block text-xs font-semibold">Check out</span>
               <input
-                type="text"
+                type="date"
+                value={checkOut}
+                onChange={(event) => setCheckOut(event.target.value)}
+                aria-label="Check-out date"
+                min={checkIn || undefined}
                 placeholder="Add dates"
-                className="w-full truncate border-0 bg-transparent p-0 text-sm text-[#717171] outline-none placeholder:text-[#717171]"
+                className="w-full min-w-0 border-0 bg-transparent p-0 text-sm text-[#717171] outline-none"
               />
             </label>
-            <span aria-hidden="true" className="hidden h-8 border-l border-[#dddddd] md:block" />
-            <label className="hidden min-w-0 flex-1 px-4 md:block">
+            <span aria-hidden="true" className="hidden h-8 border-l border-[#dddddd] sm:block" />
+            <label className="min-w-0 basis-[calc(100%-3rem)] border-t border-[#ebebeb] px-2 pt-3 sm:flex-1 sm:basis-0 sm:border-t-0 sm:px-4 sm:pt-0">
               <span className="block text-xs font-semibold">Who</span>
               <input
-                type="text"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                value={guestInput}
+                onChange={(event) => setGuestInput(event.target.value)}
+                aria-label="Number of guests"
                 placeholder="Add guests"
-                className="w-full truncate border-0 bg-transparent p-0 text-sm text-[#717171] outline-none placeholder:text-[#717171]"
+                className="w-full min-w-0 border-0 bg-transparent p-0 text-sm text-[#717171] outline-none placeholder:text-[#717171]"
               />
             </label>
             <button
               type="submit"
               aria-label="Search stays"
-              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[#ff385c] text-xl text-white transition-colors hover:bg-[#e31c5f]"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#ff385c] text-xl text-white transition-colors hover:bg-[#e31c5f] sm:h-12 sm:w-12"
             >
               ⌕
             </button>
@@ -320,10 +482,10 @@ export default function Home() {
               Try again
             </button>
           </div>
-        ) : listings.length === 0 && appliedSearch ? (
+        ) : listings.length === 0 && appliedFilters.search ? (
           <div className="py-16 text-center">
             <p className="text-sm text-[#717171]">
-              No stays match “{appliedSearch}”. Try another destination or title.
+              No stays match “{appliedFilters.search}”. Try another destination or title.
             </p>
             <button
               type="button"
@@ -339,7 +501,9 @@ export default function Home() {
           </p>
         ) : visibleListings.length === 0 ? (
           <p className="py-16 text-center text-sm text-[#717171]">
-            No stays in this category just yet. Try another category.
+            {hasMore
+              ? "No stays in this category have loaded yet. Load more to check additional results."
+              : "No stays in this category just yet. Try another category."}
           </p>
         ) : (
           <div className="grid grid-cols-1 gap-x-6 gap-y-9 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
@@ -401,6 +565,29 @@ export default function Home() {
                 </article>
               );
             })}
+          </div>
+        )}
+        {filterError && (
+          <p role="alert" className="mt-5 text-center text-sm text-[#c13515]">
+            {filterError}
+          </p>
+        )}
+        {loadMoreError && (
+          <p role="alert" className="mt-5 text-center text-sm text-[#c13515]">
+            {loadMoreError}
+          </p>
+        )}
+        {!isLoading && !error && listings.length > 0 && hasMore && (
+          <div className="mt-10 text-center">
+            <button
+              type="button"
+              onClick={() => void loadMoreListings()}
+              disabled={isLoadingMore}
+              aria-label="Load more available stays"
+              className="rounded-full border border-[#222222] px-6 py-3 text-sm font-semibold transition-colors hover:bg-[#f7f7f7] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isLoadingMore ? "Loading more stays…" : "Load more"}
+            </button>
           </div>
         )}
       </section>

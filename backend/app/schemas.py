@@ -68,6 +68,13 @@ class BookingListingSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class BookingDateRange(BaseModel):
+    check_in: date
+    check_out: date
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class BookingResponse(BaseModel):
     id: int
     listing_id: int

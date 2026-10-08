@@ -1,12 +1,16 @@
+from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from . import models
 from .database import Base, engine, get_db
 from .schemas import (
     BookingCreate,
+    BookingDateRange,
     BookingResponse,
     ListingCreate,
     ListingResponse,
@@ -16,6 +20,10 @@ from .schemas import (
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Airbnb Clone API")
+
+CLEANING_FEE = Decimal("35.00")
+SERVICE_FEE_RATE = Decimal("0.10")
+MONEY_PRECISION = Decimal("0.01")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,8 +47,40 @@ def health_check():
 @app.get("/listings", response_model=list[ListingResponse])
 def get_listings(
     search: str | None = Query(default=None),
+    location: str | None = Query(default=None),
+    guests: int | None = Query(default=None, gt=0),
+    check_in: date | None = None,
+    check_out: date | None = None,
+    limit: int | None = Query(default=None, gt=0, le=100),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
+    if guests is not None and guests < 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="guests must be greater than zero.",
+        )
+    if (check_in is None) != (check_out is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Both check_in and check_out are required for availability filtering.",
+        )
+    if check_in is not None and check_out is not None and check_out <= check_in:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="check_out must be after check_in.",
+        )
+    if limit is not None and (limit < 1 or limit > 100):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="limit must be between 1 and 100.",
+        )
+    if offset < 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="offset must be zero or greater.",
+        )
+
     query = db.query(models.Listing)
     search_term = search.strip() if search else ""
     if search_term:
@@ -56,6 +96,36 @@ def get_listings(
                 models.Listing.title.ilike(pattern, escape="\\"),
             )
         )
+    location_term = location.strip() if location else ""
+    if location_term:
+        escaped_location = (
+            location_term.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        query = query.filter(
+            models.Listing.location.ilike(
+                f"%{escaped_location}%",
+                escape="\\",
+            )
+        )
+    if guests is not None:
+        query = query.filter(models.Listing.max_guests >= guests)
+    if check_in is not None and check_out is not None:
+        query = query.filter(
+            ~models.Listing.bookings.any(
+                and_(
+                    models.Booking.check_in < check_out,
+                    models.Booking.check_out > check_in,
+                )
+            )
+        )
+
+    query = query.order_by(models.Listing.id)
+    if offset:
+        query = query.offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
     return query.all()
 
 
@@ -69,6 +139,27 @@ def get_listing(listing_id: int, db: Session = Depends(get_db)):
     if listing is None:
         raise HTTPException(status_code=404, detail="Listing not found")
     return listing
+
+
+@app.get(
+    "/listings/{listing_id}/availability",
+    response_model=list[BookingDateRange],
+)
+def get_listing_availability(listing_id: int, db: Session = Depends(get_db)):
+    listing_exists = (
+        db.query(models.Listing.id)
+        .filter(models.Listing.id == listing_id)
+        .first()
+    )
+    if listing_exists is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+
+    return (
+        db.query(models.Booking)
+        .filter(models.Booking.listing_id == listing_id)
+        .order_by(models.Booking.check_in)
+        .all()
+    )
 
 
 @app.post(
@@ -156,12 +247,20 @@ def create_booking(booking_data: BookingCreate, db: Session = Depends(get_db)):
         )
 
     nights = (booking_data.check_out - booking_data.check_in).days
+    subtotal = (
+        Decimal(str(listing.price_per_night)) * nights
+    ).quantize(MONEY_PRECISION, rounding=ROUND_HALF_UP)
+    service_fee = (subtotal * SERVICE_FEE_RATE).quantize(
+        MONEY_PRECISION,
+        rounding=ROUND_HALF_UP,
+    )
+    total_price = subtotal + CLEANING_FEE + service_fee
     booking = models.Booking(
         listing_id=listing.id,
         check_in=booking_data.check_in,
         check_out=booking_data.check_out,
         guest_count=booking_data.guest_count,
-        total_price=listing.price_per_night * nights,
+        total_price=float(total_price),
     )
     db.add(booking)
     db.commit()
