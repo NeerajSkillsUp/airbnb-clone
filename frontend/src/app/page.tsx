@@ -294,6 +294,13 @@ export default function Home() {
       appliedFilters.guests,
   );
 
+  const today = new Date();
+  const todayString = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0"),
+  ].join("-");
+
   return (
     <main className="min-h-screen bg-white text-[#222222]">
       <header className="border-b border-[#ebebeb]">
@@ -389,6 +396,7 @@ export default function Home() {
                 value={checkIn}
                 onChange={(event) => setCheckIn(event.target.value)}
                 aria-label="Check-in date"
+                min={todayString}
                 max={checkOut || undefined}
                 placeholder="Add dates"
                 className="w-full min-w-0 border-0 bg-transparent p-0 text-sm text-[#717171] outline-none"
@@ -402,7 +410,7 @@ export default function Home() {
                 value={checkOut}
                 onChange={(event) => setCheckOut(event.target.value)}
                 aria-label="Check-out date"
-                min={checkIn || undefined}
+                min={checkIn || todayString}
                 placeholder="Add dates"
                 className="w-full min-w-0 border-0 bg-transparent p-0 text-sm text-[#717171] outline-none"
               />

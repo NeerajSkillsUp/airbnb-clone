@@ -231,6 +231,11 @@ def delete_listing(listing_id: int, db: Session = Depends(get_db)):
 
 @app.post("/bookings", response_model=BookingResponse, status_code=201)
 def create_booking(booking_data: BookingCreate, db: Session = Depends(get_db)):
+    if booking_data.check_in < date.today():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Check-in date cannot be in the past.",
+        )
     listing = (
         db.query(models.Listing)
         .filter(models.Listing.id == booking_data.listing_id)

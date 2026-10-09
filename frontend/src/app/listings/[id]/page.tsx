@@ -332,6 +332,13 @@ export default function ListingDetailsPage() {
     }
   }
 
+  const today = new Date();
+  const todayString = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0"),
+  ].join("-");
+
   return (
     <main className="min-h-screen bg-white text-[#222222]">
       <header className="border-b border-[#ebebeb]">
@@ -475,6 +482,7 @@ export default function ListingDetailsPage() {
                         <input
                           type="date"
                           required
+                          min={todayString}
                           value={checkIn}
                           disabled={isBooking}
                           onChange={(event) => {
@@ -489,7 +497,7 @@ export default function ListingDetailsPage() {
                         <input
                           type="date"
                           required
-                          min={checkIn || undefined}
+                          min={checkIn || todayString}
                           value={checkOut}
                           disabled={isBooking}
                           onChange={(event) => {
