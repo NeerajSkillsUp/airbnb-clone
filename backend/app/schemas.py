@@ -1,6 +1,22 @@
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class UserResponse(BaseModel):
+    id: int
+    display_name: str
+    role: Literal["guest", "host"]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ListingHostSummary(BaseModel):
+    id: int
+    display_name: str
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ListingWrite(BaseModel):
@@ -11,6 +27,7 @@ class ListingWrite(BaseModel):
     category: str = Field(min_length=1, max_length=100)
     image_url: str = Field(min_length=1, max_length=500)
     max_guests: int = Field(gt=0, le=100)
+    host_id: int = Field(gt=0)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -42,6 +59,9 @@ class ListingResponse(BaseModel):
     image_url: str
     max_guests: int
 
+    host_id: int | None = None
+    host: ListingHostSummary | None = None
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -50,6 +70,7 @@ class BookingCreate(BaseModel):
     check_in: date
     check_out: date
     guest_count: int = Field(gt=0)
+    guest_id: int = Field(gt=0)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -79,6 +100,7 @@ class BookingResponse(BaseModel):
     id: int
     listing_id: int
     listing: BookingListingSummary
+    guest_id: int | None = None
     check_in: date
     check_out: date
     guest_count: int

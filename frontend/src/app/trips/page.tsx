@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useDemoIdentity } from "../demo-identity";
 
 type Booking = {
   id: number;
@@ -55,12 +56,21 @@ function formatDate(value: string): string {
 }
 
 export default function TripsPage() {
+  const { identity, isReady: identityReady, error: identityError } = useDemoIdentity();
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
+    if (!identityReady) {
+      return;
+    }
+    if (!identity || identity.role !== "guest") {
+      return;
+    }
+
+    const guestId = identity.id;
     const controller = new AbortController();
     const apiUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "");
 
@@ -75,7 +85,7 @@ export default function TripsPage() {
       }
 
       try {
-        const response = await fetch(`${apiUrl}/bookings`, {
+        const response = await fetch(`${apiUrl}/bookings?guest_id=${guestId}`, {
           signal: controller.signal,
         });
         if (!response.ok) {
@@ -105,7 +115,7 @@ export default function TripsPage() {
 
     void fetchBookings();
     return () => controller.abort();
-  }, [retryCount]);
+  }, [identity, identityReady, retryCount]);
 
   return (
     <main className="min-h-screen bg-white text-[#222222]">
@@ -142,11 +152,22 @@ export default function TripsPage() {
       <section className="mx-auto max-w-[1120px] px-6 py-9 lg:px-10 lg:py-12">
         <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">My trips</h1>
         <p className="mt-3 max-w-2xl rounded-xl bg-[#f7f7f7] px-4 py-3 text-sm leading-6 text-[#717171]">
-          Demo view: these are all bookings returned by the API. This app does not yet have
-          accounts, so bookings are not associated with a specific user.
+          Showing bookings for the selected guest demo identity. This selector is not authentication.
         </p>
 
-        {isLoading ? (
+        {identityReady && !identity ? (
+          <p role="alert" className="py-20 text-center text-sm text-[#c13515]">
+            {identityError ?? "Select a demo identity to continue."}
+          </p>
+        ) : identity && identity.role !== "guest" ? (
+          <p role="status" className="py-20 text-center text-sm text-[#717171]">
+            Select a guest identity in the demo identity menu to view that guest’s trips.
+          </p>
+        ) : !identityReady ? (
+          <p role="status" className="py-20 text-center text-sm text-[#717171]">
+            Loading demo identity…
+          </p>
+        ) : isLoading ? (
           <p role="status" className="py-20 text-center text-sm text-[#717171]">
             Loading your trips…
           </p>

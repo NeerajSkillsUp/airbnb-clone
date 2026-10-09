@@ -17,10 +17,19 @@ A demo host dashboard supports property listing management.
 - Filter listings by category and toggle favorites in the browser.
 - View booked date ranges on listing details and submit bookings with date and
   guest validation.
+- Listing details show the related host name, a responsive sample-photo
+  gallery, and explicitly labeled demo amenities and review examples.
+- Listing detail availability includes a calendar built from booked date ranges
+  returned by the API; booking submission remains server-validated.
 - Estimate nightly subtotal, a $35 cleaning fee per booking, and a 10% service
   fee; the backend calculates the final booking total and rejects overlaps.
 - Review all saved bookings on the demo **My Trips** page.
-- Create, update, and delete listings from the demo **Host dashboard**.
+- Select a mock guest or host identity in the shared navigation; the selection
+  is stored in browser local storage.
+- Create, update, and delete listings owned by the selected host, and view
+  bookings for those properties on the demo **Host dashboard**.
+- Associate reservations with the selected guest and show only that guest's
+  bookings on **My Trips**.
 - Prevent deletion of listings that already have bookings.
 
 ## Technology and architecture
@@ -40,9 +49,10 @@ A demo host dashboard supports property listing management.
   `sqlite:///./airbnb.db`, a relative path; start the backend from the
   `backend` directory to use `backend/airbnb.db`. Set `SQLITE_DATABASE_URL` to
   use a different SQLite file path, such as a mounted persistent disk.
-- On backend startup, `Base.metadata.create_all()` creates tables that do not
-  exist. It does not reset existing listing rows. The project does not currently
-  include a migration framework.
+- On backend startup, a small SQLite migration creates the users table and adds
+  nullable ownership columns to existing listings/bookings before SQLAlchemy
+  creates any remaining tables. It preserves existing rows and is not a general
+  migration framework.
 
 ## Project structure
 
@@ -56,7 +66,7 @@ airbnb-clone/
 │       ├── __init__.py
 │       ├── database.py           # SQLite engine, session, and Base
 │       ├── main.py               # FastAPI application and API routes
-│       ├── models.py             # Listing and Booking SQLAlchemy models
+│       ├── models.py             # User, Listing, and Booking SQLAlchemy models
 │       ├── schemas.py            # Pydantic request/response schemas
 │       └── seed.py               # Idempotent sample listing/booking seeder
 │   └── tests/
@@ -70,6 +80,7 @@ airbnb-clone/
         └── app/
             ├── globals.css
             ├── layout.tsx
+            ├── demo-identity.tsx # Shared demo identity selector and state
             ├── page.tsx           # Explore homepage
             ├── host/
             │   └── page.tsx       # Demo listing-management dashboard
@@ -209,9 +220,9 @@ the API address changed.
 | Route | Description |
 | --- | --- |
 | `/` | Explore listings, search by destination/title, filter by category, and toggle favorites. Favorites are browser state and are not persisted. |
-| `/listings/[id]` | Listing details and booking form. |
-| `/trips` | Displays bookings returned by the API. This is a demo-wide view, not a user-specific trip list. |
-| `/host` | Demo dashboard to create, edit, and delete listings. It is not protected by authentication. |
+| `/listings/[id]` | Listing details, responsive gallery, host summary, demo amenities/review examples, availability calendar, and booking form. Gallery images beyond the listing's primary image are illustrative sample photos; amenity and review content is not verified listing/guest data. |
+| `/trips` | Displays bookings belonging to the selected guest demo identity. |
+| `/host` | Displays and manages listings and bookings belonging to the selected host demo identity. |
 
 ## API endpoints
 
@@ -221,14 +232,16 @@ All endpoints are served by FastAPI at the configured API origin.
 | --- | --- | --- |
 | `GET` | `/` | API welcome response. |
 | `GET` | `/health` | Returns the API health status. |
-| `GET` | `/listings` | Returns listings. Optional `search` matches title or location case-insensitively; `location` separately filters the location; `guests` requires sufficient capacity; `check_in` and `check_out` together exclude overlapping bookings; `limit` and `offset` paginate results. When `limit` is omitted, all matching rows are returned as before. |
+| `GET` | `/users` | Returns demo users; optional `role` filters to `guest` or `host`. |
+| `GET` | `/listings` | Returns listings. Optional `host_id` filters by owner; `search` matches title or location case-insensitively; `location` separately filters the location; `guests` requires sufficient capacity; `check_in` and `check_out` together exclude overlapping bookings; `limit` and `offset` paginate results. When `limit` is omitted, all matching rows are returned as before. |
 | `GET` | `/listings/{listing_id}` | Returns one listing or `404` if it does not exist. |
 | `GET` | `/listings/{listing_id}/availability` | Returns the listing's booked check-in/check-out ranges, or `404` if the listing does not exist. |
-| `POST` | `/listings` | Creates a listing; returns `201` and the created listing. |
-| `PUT` | `/listings/{listing_id}` | Replaces editable listing fields; returns `404` for an unknown listing. |
-| `DELETE` | `/listings/{listing_id}` | Deletes a listing and returns `204`. Returns `404` if missing and `409` if the listing has bookings. |
-| `POST` | `/bookings` | Creates a booking; returns `201` and the saved booking, including listing summary and calculated total. |
-| `GET` | `/bookings` | Returns saved bookings, newest first, with listing ID/title/location and reservation information. |
+| `POST` | `/listings` | Creates a listing for the required `host_id`; returns `201`. |
+| `PUT` | `/listings/{listing_id}` | Replaces editable listing fields for the owning `host_id`; returns `403` if the selected host does not own it. |
+| `DELETE` | `/listings/{listing_id}?host_id=...` | Deletes a listing owned by the selected host and returns `204`; returns `403` for a non-owner and `409` if the listing has bookings. |
+| `POST` | `/bookings` | Creates a booking for the required `guest_id`; returns `201` and the saved booking, including listing summary and calculated total. |
+| `GET` | `/bookings?guest_id=...` | Filters bookings by guest. If omitted, preserves the existing unfiltered response. |
+| `GET` | `/hosts/{host_id}/bookings` | Returns bookings for listings owned by the specified host. |
 
 ### Listing request fields
 
@@ -243,7 +256,8 @@ fields:
   "price_per_night": 125,
   "category": "Design",
   "image_url": "https://example.com/apartment.jpg",
-  "max_guests": 2
+  "max_guests": 2,
+  "host_id": 3
 }
 ```
 
@@ -262,7 +276,8 @@ default rating of `0.0`; the host form does not edit ratings.
   "listing_id": 1,
   "check_in": "2030-06-10",
   "check_out": "2030-06-13",
-  "guest_count": 2
+  "guest_count": 2,
+  "guest_id": 1
 }
 ```
 
@@ -283,17 +298,17 @@ after check-in; guest counts must be positive. Invalid filter values return
 
 ## Database and sample data
 
-The SQLAlchemy models are defined in `backend/app/models.py`. A listing can have
-many bookings; each booking references a listing through a foreign key. There
-is no Host model or listing ownership field, so listings and bookings are not
-associated with host identities. Adding host records and ownership would
-require a separate schema change.
+The SQLAlchemy models are defined in `backend/app/models.py`. A listing belongs
+to a host user and can have many bookings; each booking references both its
+listing and guest user through nullable foreign keys. Demo roles are plain
+`guest`/`host` values, not authenticated accounts.
 
-At startup, importing the FastAPI application runs `Base.metadata.create_all()`
-and creates missing tables without clearing existing data. The app then seeds
-eight sample listings and three sample bookings only when the listings table is
-empty. Existing listings, host-created listings, and bookings are left
-untouched.
+The SQLite migration runs before `Base.metadata.create_all()` and adds
+`listings.host_id` and `bookings.guest_id` only when missing. It then seeds four
+stable demo identities idempotently. Eight sample listings and three sample
+bookings are inserted only when the listings table is empty. Existing listing
+and booking fields and non-null ownership IDs are preserved; legacy rows with
+null ownership IDs are assigned to demo identities.
 
 To populate a fresh or empty database with sample listings:
 
@@ -326,8 +341,9 @@ python -m unittest discover -s tests -v
 The tests use isolated in-memory SQLite databases and cover title/location
 search, capacity and availability filtering, invalid date ranges, pagination,
 booked date ranges, booking fee calculation, and overlap rejection.
-Seeding tests also cover initial sample data, repeat-run preservation, and
-availability of seeded booking ranges.
+Seeding tests also cover initial sample data, repeat-run preservation,
+ownership backfill, legacy SQLite schema migration, and availability of seeded
+booking ranges.
 
 For a manual API smoke check while the backend is running:
 
@@ -360,10 +376,8 @@ For interactive request/response exploration, use
 
 ## Demo limitations
 
-This is an assignment/demo project, not a production booking service. There is
-no user authentication, account ownership, or authorization. The `/trips` page
-shows all bookings returned by the API, and the host dashboard can manage the
-shared listing collection. Listings and bookings have no host identity
-association. There is no payment processing, image upload,
-cancellation flow, or user-specific booking management. Do not expose this API
-as-is to untrusted users.
+This is an assignment/demo project, not a production booking service. The
+identity selector, ownership checks, and booking filters use client-selected
+demo IDs; they are not authentication and do not protect the API from a caller
+claiming another user's ID. There is no payment processing, image upload, or
+cancellation flow. Do not expose this API as-is to untrusted users.

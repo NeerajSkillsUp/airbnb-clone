@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +9,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from . import models
-from .database import Base, engine, get_db
+from .database import Base, engine, get_db, migrate_sqlite_ownership_columns
 from .seed import seed_database
 from .schemas import (
     BookingCreate,
@@ -18,8 +18,10 @@ from .schemas import (
     ListingCreate,
     ListingResponse,
     ListingUpdate,
+    UserResponse,
 )
 
+migrate_sqlite_ownership_columns(engine)
 Base.metadata.create_all(bind=engine)
 
 
@@ -57,6 +59,29 @@ def health_check():
     return {"status": "healthy"}
 
 
+def require_user_role(db: Session, user_id: int, role: str) -> models.User:
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Demo user not found")
+    if user.role != role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"A {role} identity is required.",
+        )
+    return user
+
+
+@app.get("/users", response_model=list[UserResponse])
+def get_users(
+    role: Literal["guest", "host"] | None = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(models.User)
+    if role is not None:
+        query = query.filter(models.User.role == role)
+    return query.order_by(models.User.id).all()
+
+
 @app.get("/listings", response_model=list[ListingResponse])
 def get_listings(
     search: str | None = Query(default=None),
@@ -66,6 +91,7 @@ def get_listings(
     check_out: date | None = None,
     limit: int | None = Query(default=None, gt=0, le=100),
     offset: int = Query(default=0, ge=0),
+    host_id: int | None = None,
     db: Session = Depends(get_db),
 ):
     if guests is not None and guests < 1:
@@ -95,6 +121,10 @@ def get_listings(
         )
 
     query = db.query(models.Listing)
+    if host_id is not None:
+        require_user_role(db, host_id, "host")
+        query = query.filter(models.Listing.host_id == host_id)
+
     search_term = search.strip() if search else ""
     if search_term:
         escaped_search = (
@@ -181,6 +211,7 @@ def get_listing_availability(listing_id: int, db: Session = Depends(get_db)):
     status_code=status.HTTP_201_CREATED,
 )
 def create_listing(listing_data: ListingCreate, db: Session = Depends(get_db)):
+    require_user_role(db, listing_data.host_id, "host")
     listing = models.Listing(**listing_data.model_dump())
     db.add(listing)
     db.commit()
@@ -201,16 +232,27 @@ def update_listing(
     )
     if listing is None:
         raise HTTPException(status_code=404, detail="Listing not found")
+    require_user_role(db, listing_data.host_id, "host")
+    if listing.host_id != listing_data.host_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This listing is not owned by the selected host.",
+        )
 
     for field, value in listing_data.model_dump().items():
-        setattr(listing, field, value)
+        if field != "host_id":
+            setattr(listing, field, value)
     db.commit()
     db.refresh(listing)
     return listing
 
 
 @app.delete("/listings/{listing_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_listing(listing_id: int, db: Session = Depends(get_db)):
+def delete_listing(
+    listing_id: int,
+    host_id: int = Query(gt=0),
+    db: Session = Depends(get_db),
+):
     listing = (
         db.query(models.Listing)
         .filter(models.Listing.id == listing_id)
@@ -218,6 +260,12 @@ def delete_listing(listing_id: int, db: Session = Depends(get_db)):
     )
     if listing is None:
         raise HTTPException(status_code=404, detail="Listing not found")
+    require_user_role(db, host_id, "host")
+    if listing.host_id != host_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This listing is not owned by the selected host.",
+        )
     if db.query(models.Booking).filter(models.Booking.listing_id == listing_id).first():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -243,6 +291,7 @@ def create_booking(booking_data: BookingCreate, db: Session = Depends(get_db)):
     )
     if listing is None:
         raise HTTPException(status_code=404, detail="Listing not found")
+    require_user_role(db, booking_data.guest_id, "guest")
     if booking_data.guest_count > listing.max_guests:
         raise HTTPException(
             status_code=422,
@@ -275,6 +324,7 @@ def create_booking(booking_data: BookingCreate, db: Session = Depends(get_db)):
     total_price = subtotal + CLEANING_FEE + service_fee
     booking = models.Booking(
         listing_id=listing.id,
+        guest_id=booking_data.guest_id,
         check_in=booking_data.check_in,
         check_out=booking_data.check_out,
         guest_count=booking_data.guest_count,
@@ -287,5 +337,24 @@ def create_booking(booking_data: BookingCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/bookings", response_model=list[BookingResponse])
-def get_bookings(db: Session = Depends(get_db)):
-    return db.query(models.Booking).order_by(models.Booking.created_at.desc()).all()
+def get_bookings(
+    guest_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(models.Booking)
+    if guest_id is not None:
+        require_user_role(db, guest_id, "guest")
+        query = query.filter(models.Booking.guest_id == guest_id)
+    return query.order_by(models.Booking.created_at.desc()).all()
+
+
+@app.get("/hosts/{host_id}/bookings", response_model=list[BookingResponse])
+def get_host_bookings(host_id: int, db: Session = Depends(get_db)):
+    require_user_role(db, host_id, "host")
+    return (
+        db.query(models.Booking)
+        .join(models.Listing)
+        .filter(models.Listing.host_id == host_id)
+        .order_by(models.Booking.created_at.desc())
+        .all()
+    )

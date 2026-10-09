@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import { useDemoIdentity } from "../demo-identity";
 
 type Listing = {
   id: number;
@@ -14,6 +15,16 @@ type Listing = {
   category: string;
   image_url: string;
   max_guests: number;
+  host_id: number | null;
+};
+
+type HostBooking = {
+  id: number;
+  listing: { title: string; location: string };
+  check_in: string;
+  check_out: string;
+  guest_count: number;
+  total_price: number;
 };
 
 type ListingForm = {
@@ -51,7 +62,28 @@ function isListing(value: unknown): value is Listing {
     typeof listing.rating === "number" &&
     typeof listing.category === "string" &&
     typeof listing.image_url === "string" &&
-    typeof listing.max_guests === "number"
+    typeof listing.max_guests === "number" &&
+    (typeof listing.host_id === "number" || listing.host_id === null)
+  );
+}
+
+function isHostBooking(value: unknown): value is HostBooking {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const booking = value as Record<string, unknown>;
+  if (typeof booking.listing !== "object" || booking.listing === null) {
+    return false;
+  }
+  const listing = booking.listing as Record<string, unknown>;
+  return (
+    typeof booking.id === "number" &&
+    typeof listing.title === "string" &&
+    typeof listing.location === "string" &&
+    typeof booking.check_in === "string" &&
+    typeof booking.check_out === "string" &&
+    typeof booking.guest_count === "number" &&
+    typeof booking.total_price === "number"
   );
 }
 
@@ -78,7 +110,9 @@ async function getErrorMessage(response: Response): Promise<string> {
 }
 
 export default function HostPage() {
+  const { identity, isReady: identityReady } = useDemoIdentity();
   const [listings, setListings] = useState<Listing[]>([]);
+  const [bookings, setBookings] = useState<HostBooking[]>([]);
   const [form, setForm] = useState<ListingForm>(emptyForm);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -90,13 +124,13 @@ export default function HostPage() {
   const [retryCount, setRetryCount] = useState(0);
   const requestInProgress = useRef(false);
 
-  const loadListings = useCallback(async (signal?: AbortSignal): Promise<Listing[]> => {
+  const loadListings = useCallback(async (hostId: number, signal?: AbortSignal): Promise<Listing[]> => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "");
     if (!apiUrl) {
       throw new Error("The listings API URL is not configured. Set NEXT_PUBLIC_API_URL and try again.");
     }
 
-    const response = await fetch(`${apiUrl}/listings`, { signal });
+    const response = await fetch(`${apiUrl}/listings?host_id=${hostId}`, { signal });
     if (!response.ok) {
       throw new Error(await getErrorMessage(response));
     }
@@ -109,13 +143,40 @@ export default function HostPage() {
   }, []);
 
   useEffect(() => {
+    if (!identityReady) {
+      return;
+    }
+    if (!identity || identity.role !== "host") {
+      return;
+    }
+
+    const hostId = identity.id;
     const controller = new AbortController();
 
     async function fetchListings() {
+      setIsLoading(true);
+      setListings([]);
+      setBookings([]);
+      setLoadError(null);
       try {
-        const loadedListings = await loadListings(controller.signal);
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "");
+        if (!apiUrl) {
+          throw new Error("The listings API URL is not configured. Set NEXT_PUBLIC_API_URL and try again.");
+        }
+        const [loadedListings, bookingsResponse] = await Promise.all([
+          loadListings(hostId, controller.signal),
+          fetch(`${apiUrl}/hosts/${hostId}/bookings`, { signal: controller.signal }),
+        ]);
+        if (!bookingsResponse.ok) {
+          throw new Error(await getErrorMessage(bookingsResponse));
+        }
+        const bookingsData: unknown = await bookingsResponse.json();
+        if (!Array.isArray(bookingsData) || !bookingsData.every(isHostBooking)) {
+          throw new Error("The bookings service returned data in an unexpected format.");
+        }
         if (!controller.signal.aborted) {
           setListings(loadedListings);
+          setBookings(bookingsData);
           setLoadError(null);
           setIsLoading(false);
         }
@@ -133,7 +194,7 @@ export default function HostPage() {
 
     void fetchListings();
     return () => controller.abort();
-  }, [loadListings, retryCount]);
+  }, [identity, identityReady, loadListings, retryCount]);
 
   function updateField(field: keyof ListingForm, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -166,6 +227,10 @@ export default function HostPage() {
 
   async function submitForm(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!identity || identity.role !== "host") {
+      setFormError("Select a host demo identity before managing listings.");
+      return;
+    }
     if (requestInProgress.current) {
       return;
     }
@@ -201,6 +266,7 @@ export default function HostPage() {
         category: form.category.trim(),
         image_url: form.image_url.trim(),
         max_guests: maxGuests,
+        host_id: identity.id,
       };
       const response = await fetch(
         `${apiUrl}/listings${editingId === null ? "" : `/${editingId}`}`,
@@ -218,7 +284,7 @@ export default function HostPage() {
       if (!isListing(savedListing)) {
         throw new Error("The API saved the listing but returned an unexpected response.");
       }
-      const refreshedListings = await loadListings();
+      const refreshedListings = await loadListings(identity.id);
       setListings(refreshedListings);
       setEditingId(null);
       setForm(emptyForm);
@@ -236,6 +302,10 @@ export default function HostPage() {
   }
 
   async function deleteListing(listing: Listing) {
+    if (!identity || identity.role !== "host") {
+      setLoadError("Select a host demo identity before managing listings.");
+      return;
+    }
     const confirmed = window.confirm(
       `Delete “${listing.title}”? This action cannot be undone.`,
     );
@@ -254,7 +324,7 @@ export default function HostPage() {
     setLoadError(null);
     setSuccessMessage(null);
     try {
-      const response = await fetch(`${apiUrl}/listings/${listing.id}`, {
+      const response = await fetch(`${apiUrl}/listings/${listing.id}?host_id=${identity.id}`, {
         method: "DELETE",
       });
       if (!response.ok) {
@@ -282,6 +352,7 @@ export default function HostPage() {
   const inputClassName =
     "mt-1 w-full rounded-lg border border-[#b0b0b0] bg-white px-3 py-3 text-sm outline-none focus:border-[#222222] focus:ring-1 focus:ring-[#222222] disabled:bg-[#f7f7f7]";
   const labelClassName = "block text-sm font-medium";
+  const isSelectedHost = identity?.role === "host";
 
   return (
     <main className="min-h-screen bg-white text-[#222222]">
@@ -302,9 +373,14 @@ export default function HostPage() {
       <section className="mx-auto max-w-[1200px] px-6 py-9 lg:px-10 lg:py-12">
         <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Host dashboard</h1>
         <p className="mt-3 max-w-3xl rounded-xl bg-[#f7f7f7] px-4 py-3 text-sm leading-6 text-[#717171]">
-          Demo host dashboard: listings are shared across this assignment. There is no host
-          authentication or user-specific access control.
+          Demo host dashboard for the selected host. This identity selector is for demonstration
+          only and does not provide authentication.
         </p>
+        {identity && identity.role !== "host" && (
+          <p role="status" className="mt-4 text-sm text-[#717171]">
+            Select a host identity in the demo identity menu to manage properties and view bookings.
+          </p>
+        )}
 
         {successMessage && (
           <p role="status" className="mt-5 rounded-lg bg-[#f0f8f2] px-4 py-3 text-sm text-[#245b35]">
@@ -418,7 +494,7 @@ export default function HostPage() {
               <div className="flex flex-wrap gap-3 pt-1">
                 <button
                   type="submit"
-                  disabled={isSaving}
+                  disabled={isSaving || identity?.role !== "host"}
                   className="rounded-full bg-[#ff385c] px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#e31c5f] disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {isSaving
@@ -444,14 +520,22 @@ export default function HostPage() {
           <section aria-label="Managed listings">
             <div className="flex items-center justify-between gap-4">
               <h2 className="text-xl font-semibold">Your listings</h2>
-              {!isLoading && !loadError && (
+              {isSelectedHost && !isLoading && !loadError && (
                 <span className="text-sm text-[#717171]">
                   {listings.length} {listings.length === 1 ? "property" : "properties"}
                 </span>
               )}
             </div>
 
-            {loadError && (
+            {!identityReady ? (
+              <p role="status" className="py-16 text-center text-sm text-[#717171]">
+                Loading demo identity…
+              </p>
+            ) : !isSelectedHost ? (
+              <p className="mt-5 rounded-xl bg-[#f7f7f7] p-5 text-sm text-[#717171]">
+                Select a host identity to view and manage its listings.
+              </p>
+            ) : loadError ? (
               <div role="alert" className="mt-5 rounded-xl bg-[#fff2f0] p-4">
                 <p className="text-sm text-[#c13515]">{loadError}</p>
                 <button
@@ -466,9 +550,7 @@ export default function HostPage() {
                   Try again
                 </button>
               </div>
-            )}
-
-            {isLoading ? (
+            ) : isLoading ? (
               <p role="status" className="py-16 text-center text-sm text-[#717171]">
                 Loading listings…
               </p>
@@ -524,6 +606,34 @@ export default function HostPage() {
                 ))}
               </div>
             ) : null}
+
+            <section aria-label="Bookings for your listings" className="mt-10">
+              <h2 className="text-xl font-semibold">Bookings for your properties</h2>
+              {!identityReady ? (
+                <p role="status" className="py-8 text-sm text-[#717171]">Loading demo identity…</p>
+              ) : !isSelectedHost ? (
+                <p className="mt-4 text-sm text-[#717171]">Select a host identity to view bookings.</p>
+              ) : isLoading ? (
+                <p role="status" className="py-8 text-sm text-[#717171]">Loading bookings…</p>
+              ) : bookings.length === 0 ? (
+                <p className="mt-4 rounded-xl border border-dashed border-[#dddddd] p-5 text-sm text-[#717171]">
+                  No bookings for this host’s properties yet.
+                </p>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {bookings.map((booking) => (
+                    <article key={booking.id} className="rounded-xl border border-[#dddddd] p-4">
+                      <h3 className="font-semibold">{booking.listing.title}</h3>
+                      <p className="mt-1 text-sm text-[#717171]">{booking.listing.location}</p>
+                      <p className="mt-2 text-sm">
+                        {booking.check_in} – {booking.check_out} · {booking.guest_count} guests
+                      </p>
+                      <p className="mt-1 text-sm font-semibold">${booking.total_price.toFixed(2)}</p>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
           </section>
         </div>
       </section>

@@ -3,9 +3,18 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy.orm import Session
 
-from .database import Base, SessionLocal
-from .models import Booking, Listing
+from .database import Base, SessionLocal, migrate_sqlite_ownership_columns
+from .models import Booking, Listing, User
 
+
+DEMO_USERS = (
+    {"id": 1, "display_name": "Demo Guest", "role": "guest"},
+    {"id": 2, "display_name": "Weekend Guest", "role": "guest"},
+    {"id": 3, "display_name": "Alex Host", "role": "host"},
+    {"id": 4, "display_name": "Jordan Host", "role": "host"},
+)
+DEFAULT_GUEST_ID = 1
+DEFAULT_HOST_ID = 3
 
 sample_listings = [
     {
@@ -90,6 +99,17 @@ sample_listings = [
     },
 ]
 
+sample_listing_host_ids = {
+    "Amalfi Coast Villa with Sea Views": 3,
+    "Cozy Mountain Cabin": 4,
+    "Santorini Cliffside Escape": 3,
+    "Beachfront Tropical Hideaway": 4,
+    "Desert Tiny Home": 3,
+    "Charming City Apartment": 4,
+    "Lakefront Wooden Retreat": 3,
+    "Countryside Stone Cottage": 4,
+}
+
 
 def seed_database(db: Session | None = None) -> None:
     owns_session = db is None
@@ -97,51 +117,81 @@ def seed_database(db: Session | None = None) -> None:
         db = SessionLocal()
 
     try:
+        migrate_sqlite_ownership_columns(db.get_bind())
         Base.metadata.create_all(bind=db.get_bind())
+
+        for demo_user in DEMO_USERS:
+            existing_user = db.get(User, demo_user["id"])
+            if existing_user is None:
+                db.add(User(**demo_user))
+            elif (
+                existing_user.display_name != demo_user["display_name"]
+                or existing_user.role != demo_user["role"]
+            ):
+                raise ValueError(
+                    f"Demo identity ID {demo_user['id']} is already in use."
+                )
+        db.flush()
+
         existing_count = db.query(Listing).count()
 
-        if existing_count > 0:
+        if existing_count == 0:
+            listings = [
+                Listing(
+                    **listing,
+                    host_id=sample_listing_host_ids[listing["title"]],
+                )
+                for listing in sample_listings
+            ]
+            db.add_all(listings)
+            db.flush()
+
+            listings_by_title = {listing.title: listing for listing in listings}
+            today = date.today()
+            sample_bookings = [
+                ("Amalfi Coast Villa with Sea Views", 45, 3, 2),
+                ("Cozy Mountain Cabin", 65, 2, 3),
+                ("Charming City Apartment", 85, 4, 2),
+            ]
+            for title, start_offset, nights, guest_count in sample_bookings:
+                listing = listings_by_title[title]
+                subtotal = Decimal(str(listing.price_per_night)) * nights
+                service_fee = (subtotal * Decimal("0.10")).quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_HALF_UP,
+                )
+                total_price = subtotal + Decimal("35.00") + service_fee
+                check_in = today + timedelta(days=start_offset)
+                db.add(
+                    Booking(
+                        listing=listing,
+                        guest_id=DEFAULT_GUEST_ID,
+                        check_in=check_in,
+                        check_out=check_in + timedelta(days=nights),
+                        guest_count=guest_count,
+                        total_price=float(total_price),
+                    )
+                )
+        else:
             print(
                 f"Database already has {existing_count} listings. "
                 "No sample listings or bookings added."
             )
-            return
 
-        listings = [Listing(**listing) for listing in sample_listings]
-        db.add_all(listings)
-        db.flush()
-
-        listings_by_title = {listing.title: listing for listing in listings}
-        today = date.today()
-        sample_bookings = [
-            ("Amalfi Coast Villa with Sea Views", 45, 3, 2),
-            ("Cozy Mountain Cabin", 65, 2, 3),
-            ("Charming City Apartment", 85, 4, 2),
-        ]
-        for title, start_offset, nights, guest_count in sample_bookings:
-            listing = listings_by_title[title]
-            subtotal = Decimal(str(listing.price_per_night)) * nights
-            service_fee = (subtotal * Decimal("0.10")).quantize(
-                Decimal("0.01"),
-                rounding=ROUND_HALF_UP,
+        for listing in db.query(Listing).filter(Listing.host_id.is_(None)):
+            listing.host_id = sample_listing_host_ids.get(
+                listing.title,
+                DEFAULT_HOST_ID,
             )
-            total_price = subtotal + Decimal("35.00") + service_fee
-            check_in = today + timedelta(days=start_offset)
-            db.add(
-                Booking(
-                    listing=listing,
-                    check_in=check_in,
-                    check_out=check_in + timedelta(days=nights),
-                    guest_count=guest_count,
-                    total_price=float(total_price),
-                )
-            )
+        for booking in db.query(Booking).filter(Booking.guest_id.is_(None)):
+            booking.guest_id = DEFAULT_GUEST_ID
 
         db.commit()
-        print(
-            f"Successfully added {len(listings)} sample listings and "
-            f"{len(sample_bookings)} sample bookings."
-        )
+        if existing_count == 0:
+            print(
+                f"Successfully added {len(sample_listings)} sample listings and "
+                "3 sample bookings."
+            )
     except Exception:
         db.rollback()
         raise

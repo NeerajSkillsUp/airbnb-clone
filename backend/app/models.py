@@ -6,6 +6,17 @@ from sqlalchemy.orm import relationship
 from .database import Base
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    display_name = Column(String(100), nullable=False)
+    role = Column(String(20), nullable=False)
+
+    listings = relationship("Listing", back_populates="host")
+    bookings = relationship("Booking", back_populates="guest")
+
+
 class Listing(Base):
     __tablename__ = "listings"
 
@@ -18,8 +29,10 @@ class Listing(Base):
     category = Column(String(100), nullable=False)
     image_url = Column(String(500), nullable=False)
     max_guests = Column(Integer, default=2, nullable=False)
+    host_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
 
     bookings = relationship("Booking", back_populates="listing")
+    host = relationship("User", back_populates="listings")
 
 
 class Booking(Base):
@@ -27,6 +40,7 @@ class Booking(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     listing_id = Column(Integer, ForeignKey("listings.id"), nullable=False, index=True)
+    guest_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     check_in = Column(Date, nullable=False)
     check_out = Column(Date, nullable=False)
     guest_count = Column(Integer, nullable=False)
@@ -34,3 +48,4 @@ class Booking(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     listing = relationship("Listing", back_populates="bookings")
+    guest = relationship("User", back_populates="bookings")
