@@ -1,4 +1,4 @@
-# Staybnb — Airbnb-Style Rental Marketplace
+# Airbnb Clone — Airbnb-Style Rental Marketplace
 
 A full-stack rental marketplace inspired by Airbnb, built with **Next.js, TypeScript, FastAPI, and SQLite**. Explore stays, check availability, book trips, and manage property listings through a host dashboard.
 
